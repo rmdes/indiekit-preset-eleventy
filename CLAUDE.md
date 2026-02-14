@@ -9,7 +9,7 @@ Fork of `@indiekit/preset-eleventy` with custom modifications for the `@rmdes/*`
 **Upstream:** Fork of `@indiekit/preset-eleventy` (Paul Robert Lloyd)
 **Purpose:** Configures Indiekit to generate Eleventy-compatible Markdown files with YAML frontmatter
 
-**Version:** 1.0.0-beta.35
+**Version:** 1.0.0-beta.36
 
 ## What This Fork Changes from Upstream
 
@@ -22,41 +22,46 @@ Fork of `@indiekit/preset-eleventy` with custom modifications for the `@rmdes/*`
 delete properties.url;  // Remove URL, let Eleventy generate from file path
 ```
 
-**Fork behavior:**
+**Fork behavior (beta.36):**
 ```javascript
-delete properties.url;  // Same as upstream (as of beta.35)
+// For pages (single-segment URLs like /about, /videos):
+//   Convert URL to permalink so Eleventy generates at /{slug}/
+// For regular posts (multi-segment URLs like /articles/2026/02/13/slug):
+//   Delete URL, let Eleventy use file paths (nginx rewrites handle mapping)
+if (properties.url) {
+  const segments = url.split("/").filter(Boolean);
+  if (segments.length === 1) {
+    properties.permalink = `/${slug}/`;
+  }
+}
+delete properties.url;
 ```
 
 **History:**
-- **Beta.34:** Fork added `permalink: /TYPE/YYYY/MM/DD/slug/` to frontmatter (Indiekit URL format)
-  - **Problem:** Conflicted with nginx rewrites. nginx expected `/content/TYPE/YYYY-MM-DD-slug/`, but Eleventy generated at `/TYPE/YYYY/MM/DD/slug/`. Result: 404s.
-- **Earlier versions (Jan-Feb):** Used `permalink: /content/TYPE/YYYY-MM-DD-slug/` which happened to match file-path-based URL, but was redundant.
-- **Beta.35 (current):** Removed `permalink` entirely. Just `delete properties.url` like upstream.
+- **Beta.34:** Fork added `permalink` for ALL post types → conflicted with nginx rewrites → 404s.
+- **Beta.35:** Removed ALL permalink logic → broke pages (generated at `/content/pages/slug/` instead of `/slug/`).
+- **Beta.36 (current):** Adds `permalink` ONLY for pages (single-segment URLs). Regular posts still use file paths.
 
-**CRITICAL RULE: Do NOT add `permalink` to frontmatter**
+**Why pages need permalink but regular posts don't:**
+- **Pages** are stored at `content/pages/slug.md`. Without permalink, Eleventy generates at `/content/pages/slug/`. Pages need `permalink: /slug/` to generate at root level.
+- **Regular posts** are stored at `content/articles/2026-02-13-slug.md`. Eleventy generates at `/content/articles/2026-02-13-slug/`. nginx rewrites map Indiekit URLs to this path. No permalink needed.
 
-**Why:**
-- Eleventy generates URLs from file paths. File path is `content/articles/2026-02-13-slug.md` → URL is `/content/articles/2026-02-13-slug/`.
-- nginx has rewrite rules that redirect `/articles/2026/02/13/slug/` → `/content/articles/2026-02-13-slug/`.
-- Blog listing links use `/content/` URLs directly.
-- Adding `permalink:` to frontmatter makes Eleventy generate at the permalink path instead of the file-path-based `/content/` path.
-- Result: nginx rewrites fail, 404s.
+**The correct workflow for pages:**
+1. Indiekit creates page at `content/pages/videos.md`
+2. Indiekit URL is `/videos` (from post type config: `url: "{slug}"`)
+3. `post-template.js` detects single-segment URL → sets `permalink: /videos/`
+4. Eleventy builds HTML at `/videos/index.html` (from permalink)
 
-**The correct workflow:**
+**The correct workflow for regular posts:**
 1. Indiekit creates post at `content/articles/2026-02-13-slug.md`
 2. Indiekit URL is `/articles/2026/02/13/slug/` (from post type config)
-3. Eleventy builds HTML at `/content/articles/2026-02-13-slug/index.html` (from file path)
-4. nginx rewrites `/articles/2026/02/13/slug/` → `/content/articles/2026-02-13-slug/` (legacy URL support)
-5. Blog listing links point to `/content/articles/2026-02-13-slug/` directly
+3. `post-template.js` detects multi-segment URL → does NOT add permalink
+4. Eleventy builds HTML at `/content/articles/2026-02-13-slug/index.html` (from file path)
+5. nginx/Caddy rewrites `/articles/2026/02/13/slug/` → `/content/articles/2026-02-13-slug/`
 
 **Do NOT:**
-- Add `permalink: properties.url` to frontmatter
-- Add `permalink: /content/...` to frontmatter
-- Call `formatUrl()` or any URL generation logic in `post-template.js`
-
-**The template should ONLY:**
-- Convert JF2 properties to YAML frontmatter
-- Delete `properties.url` (let Eleventy handle it)
+- Add `permalink` for ALL post types (breaks nginx rewrites for regular posts)
+- Remove permalink for pages (breaks root-level URL generation)
 
 ### 2. Post Type Path Overrides
 
@@ -317,18 +322,19 @@ plugins: [
 
 **Note:** Watcher auto-restarts with exponential backoff on crashes (Docker Compose deployment).
 
-### Permalink added to frontmatter causes 404s
+### Pages generate at /content/pages/slug/ instead of /slug/
 
-**Cause:** Someone edited `post-template.js` to add `permalink: properties.url`.
+**Cause:** The preset's `post-template.js` is not adding `permalink` for pages.
 
-**History:** This was tried in beta.34, caused widespread 404s, removed in beta.35.
+**Fix:** Ensure `post-template.js` has the conditional permalink logic (beta.36+):
+- Single-segment URLs (pages) → add `permalink: /slug/`
+- Multi-segment URLs (regular posts) → no permalink, let file paths handle it
 
-**Fix:**
-1. Check `lib/post-template.js` line 59 — should be `delete properties.url;` ONLY
-2. If `permalink` logic is present, remove it
-3. Bump version, publish to npm, update deployment
+### Regular posts return 404 after adding permalink
 
-**CRITICAL: NEVER add permalink logic to this preset.** nginx rewrites handle URL mapping. Let Eleventy generate URLs from file paths.
+**Cause:** Someone added `permalink` for ALL post types (beta.34 regression).
+
+**Fix:** Ensure `post-template.js` only adds `permalink` for single-segment URLs (pages). Multi-segment URLs (regular posts) must NOT get a permalink — nginx/Caddy rewrites handle the mapping.
 
 ## Deployment Workflow
 
