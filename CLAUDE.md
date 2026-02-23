@@ -9,30 +9,39 @@ Fork of `@indiekit/preset-eleventy` with custom modifications for the `@rmdes/*`
 **Upstream:** Fork of `@indiekit/preset-eleventy` (Paul Robert Lloyd)
 **Purpose:** Configures Indiekit to generate Eleventy-compatible Markdown files with YAML frontmatter
 
-**Version:** 1.0.0-beta.36
+**Version:** 1.0.0-beta.38
 
 ## What This Fork Changes from Upstream
 
 ### 1. Post Template URL Handling (CRITICAL)
 
-**File:** `lib/post-template.js`, line 59
+**File:** `lib/post-template.js`, lines 59-76
 
 **Upstream behavior:**
 ```javascript
 delete properties.url;  // Remove URL, let Eleventy generate from file path
 ```
 
-**Fork behavior (beta.36):**
+**Fork behavior (beta.38):**
 ```javascript
-// For pages (single-segment URLs like /about, /videos):
-//   Convert URL to permalink so Eleventy generates at /{slug}/
-// For regular posts (multi-segment URLs like /articles/2026/02/13/slug):
-//   Delete URL, let Eleventy use file paths (nginx rewrites handle mapping)
+// Store the Micropub URL for frontend edit links before deleting it
 if (properties.url) {
-  const segments = url.split("/").filter(Boolean);
-  if (segments.length === 1) {
-    properties.permalink = `/${slug}/`;
+  properties.mpUrl = properties.url;
+}
+
+// Convert Indiekit URL to Eleventy permalink so pages generate
+// at the canonical URL (e.g., /notes/2026/02/22/slug/) instead of
+// the file-path-based URL (e.g., /content/notes/2026-02-22-slug/).
+if (properties.url) {
+  let url = properties.url;
+  if (url.startsWith("http://") || url.startsWith("https://")) {
+    try {
+      url = new URL(url).pathname;
+    } catch {
+      // If URL parsing fails, use as-is
+    }
   }
+  properties.permalink = url.endsWith("/") ? url : `${url}/`;
 }
 delete properties.url;
 ```
@@ -40,28 +49,29 @@ delete properties.url;
 **History:**
 - **Beta.34:** Fork added `permalink` for ALL post types → conflicted with nginx rewrites → 404s.
 - **Beta.35:** Removed ALL permalink logic → broke pages (generated at `/content/pages/slug/` instead of `/slug/`).
-- **Beta.36 (current):** Adds `permalink` ONLY for pages (single-segment URLs). Regular posts still use file paths.
+- **Beta.36:** Added `permalink` ONLY for pages (single-segment URLs). Regular posts used file paths + nginx rewrites.
+- **Beta.37 (current):** Adds `permalink` for ALL post types. nginx reverses: `/content/` URLs redirect (301) to clean URLs. The Eleventy data cascade (`_data/eleventyComputed.js`) also computes `permalink` for existing posts that lack frontmatter permalink.
 
-**Why pages need permalink but regular posts don't:**
-- **Pages** are stored at `content/pages/slug.md`. Without permalink, Eleventy generates at `/content/pages/slug/`. Pages need `permalink: /slug/` to generate at root level.
-- **Regular posts** are stored at `content/articles/2026-02-13-slug.md`. Eleventy generates at `/content/articles/2026-02-13-slug/`. nginx rewrites map Indiekit URLs to this path. No permalink needed.
+**Why ALL post types now use permalink:**
+- **Eliminates URL dualism** — No more mismatch between Indiekit URLs and browser URLs
+- **No nginx rewrite dependency** — Eleventy generates pages at the canonical Indiekit URLs directly
+- **Simpler architecture** — One URL format everywhere: Indiekit stores it, Eleventy renders it, nginx serves it
+- **Legacy `/content/` URLs** — Old bookmarks get 301 redirects to clean URLs for backward compatibility
 
-**The correct workflow for pages:**
-1. Indiekit creates page at `content/pages/videos.md`
-2. Indiekit URL is `/videos` (from post type config: `url: "{slug}"`)
-3. `post-template.js` detects single-segment URL → sets `permalink: /videos/`
-4. Eleventy builds HTML at `/videos/index.html` (from permalink)
-
-**The correct workflow for regular posts:**
+**The workflow for ALL post types:**
 1. Indiekit creates post at `content/articles/2026-02-13-slug.md`
-2. Indiekit URL is `/articles/2026/02/13/slug/` (from post type config)
-3. `post-template.js` detects multi-segment URL → does NOT add permalink
-4. Eleventy builds HTML at `/content/articles/2026-02-13-slug/index.html` (from file path)
-5. nginx/Caddy rewrites `/articles/2026/02/13/slug/` → `/content/articles/2026-02-13-slug/`
+2. Indiekit URL is `/articles/2026/02/13/slug` (stored in `properties.url`)
+3. `post-template.js` converts `url` to `permalink: /articles/2026/02/13/slug/` in frontmatter
+4. Eleventy builds HTML at `/articles/2026/02/13/slug/index.html` (from permalink)
+5. nginx serves the file directly at the canonical URL
+6. Old `/content/articles/2026-02-13-slug/` URLs redirect (301) to `/articles/2026/02/13/slug/`
+
+**For existing posts without frontmatter permalink:**
+- The Eleventy data cascade (`_data/eleventyComputed.js`) computes `permalink` from the file path pattern `content/{type}/{yyyy}-{MM}-{dd}-{slug}.md` → `/{type}/{yyyy}/{MM}/{dd}/{slug}/`
 
 **Do NOT:**
-- Add `permalink` for ALL post types (breaks nginx rewrites for regular posts)
-- Remove permalink for pages (breaks root-level URL generation)
+- Remove `permalink` for ANY post type (breaks canonical URL generation)
+- Remove the data cascade file (breaks existing posts without frontmatter permalink)
 
 ### 2. Post Type Path Overrides
 
@@ -206,20 +216,23 @@ Article content here...
 
 ### nginx (Cloudron deployment)
 
-**Expects preset's URL format:**
+**Redirects legacy /content/ URLs to canonical URLs:**
 ```nginx
-# Legacy URL rewrites (Indiekit URL format → Eleventy file path format)
-rewrite ^/(articles|notes|photos)/(\d{4})/(\d{2})/(\d{2})/(.+)$ /content/$1/$2-$3-$4-$5/ last;
+# Legacy /content/ URLs redirect to clean Indiekit URLs (reversed Feb 2026)
+rewrite "^/content/articles/(\d{4})-(\d{2})-(\d{2})-(.+?)/?$" "/articles/$1/$2/$3/$4/" permanent;
+rewrite "^/content/notes/(\d{4})-(\d{2})-(\d{2})-(.+?)/?$" "/notes/$1/$2/$3/$4/" permanent;
+# ... (12 post types)
 ```
 
-**CRITICAL:** If preset changes URL format, nginx rewrites break.
+**CRITICAL:** nginx no longer rewrites Indiekit URLs to `/content/` paths. The preset sets `permalink` in frontmatter, so Eleventy generates pages at the canonical URLs directly.
 
 ### Eleventy
 
 **Consumes preset's output:**
 - Reads Markdown files from `content/{type}/{yyyy}-{MM}-{dd}-{slug}.md`
-- Parses YAML frontmatter (requires `date`, `title`, etc.)
-- Generates HTML at `/content/{type}/{yyyy}-{MM}-{dd}-{slug}/index.html` (from file path)
+- Parses YAML frontmatter (requires `date`, `title`, **`permalink`**, etc.)
+- Generates HTML at `/{type}/{yyyy}/{MM}/{dd}/{slug}/index.html` (from `permalink`)
+- For existing posts without frontmatter `permalink`, the data cascade file (`_data/eleventyComputed.js`) computes it from the file path
 
 **Directory data files:**
 ```json
@@ -275,15 +288,16 @@ Override paths for specific post types:
 
 ### Posts return 404 after creation
 
-**Cause:** URL mismatch between Indiekit URL, Eleventy output path, and nginx rewrites.
+**Cause:** Missing `permalink` in frontmatter or incorrect Eleventy output path.
 
 **Diagnosis:**
 1. Check post file exists: `content/articles/2026-02-13-slug.md`
-2. Check Eleventy output: `_site/content/articles/2026-02-13-slug/index.html` should exist
-3. Check Indiekit URL: `/articles/2026/02/13/slug/` (from Micropub Location header)
-4. Check nginx rewrites: `/articles/2026/02/13/slug/` should rewrite to `/content/articles/2026-02-13-slug/`
+2. Check frontmatter has `permalink: /articles/2026/02/13/slug/`
+3. Check Eleventy output: `_site/articles/2026/02/13/slug/index.html` should exist (NOT under `/content/`)
+4. Check Indiekit URL: `/articles/2026/02/13/slug/` (from Micropub Location header)
+5. For old `/content/` URLs: nginx should redirect (301) to the clean URL
 
-**Fix:** Ensure `post-template.js` does NOT add `permalink` to frontmatter. If present, remove it and rebuild preset.
+**Fix:** Ensure `post-template.js` adds `permalink` for ALL post types (beta.38+). The data cascade file (`_data/eleventyComputed.js`) also computes permalink for existing posts without frontmatter permalink.
 
 ### Frontmatter dates cause "Invalid Date"
 
@@ -324,17 +338,15 @@ plugins: [
 
 ### Pages generate at /content/pages/slug/ instead of /slug/
 
-**Cause:** The preset's `post-template.js` is not adding `permalink` for pages.
+**Cause:** Missing `permalink` in frontmatter.
 
-**Fix:** Ensure `post-template.js` has the conditional permalink logic (beta.36+):
-- Single-segment URLs (pages) → add `permalink: /slug/`
-- Multi-segment URLs (regular posts) → no permalink, let file paths handle it
+**Fix:** Ensure `post-template.js` adds `permalink` for ALL post types (beta.38+). This applies to pages AND regular posts. All posts should have `permalink` set to the Indiekit URL.
 
-### Regular posts return 404 after adding permalink
+### Posts generate under /content/ prefix
 
-**Cause:** Someone added `permalink` for ALL post types (beta.34 regression).
+**Cause:** Old file-path-based generation (beta.35-36 behavior). The `permalink` is missing from frontmatter.
 
-**Fix:** Ensure `post-template.js` only adds `permalink` for single-segment URLs (pages). Multi-segment URLs (regular posts) must NOT get a permalink — nginx/Caddy rewrites handle the mapping.
+**Fix:** Ensure `post-template.js` adds `permalink` for ALL post types (beta.38+). For existing posts created before beta.38, the data cascade file (`_data/eleventyComputed.js`) computes `permalink` from the file path. If posts still generate under `/content/`, verify the data cascade file exists and has the `permalink` computed property.
 
 ## Deployment Workflow
 
@@ -364,9 +376,9 @@ npm link @rmdes/indiekit-preset-eleventy
 **Production testing:**
 - Create a test Micropub post
 - Check file path: `content/{type}/{yyyy}-{MM}-{dd}-{slug}.md`
-- Check frontmatter: no `permalink`, `date` is ISO string, `title` is set
-- Check Eleventy output: `_site/content/{type}/{yyyy}-{MM}-{dd}-{slug}/index.html` exists
-- Check URL: Indiekit URL redirects to Eleventy output path
+- Check frontmatter: has `permalink: /{type}/{yyyy}/{MM}/{dd}/{slug}/`, `date` is ISO string, `title` is set
+- Check Eleventy output: `_site/{type}/{yyyy}/{MM}/{dd}/{slug}/index.html` exists (NOT under `/content/`)
+- Check URL: Indiekit URL serves directly (no redirect needed)
 
 ## History & Rationale
 
