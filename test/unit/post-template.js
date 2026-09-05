@@ -132,7 +132,10 @@ title: Lunchtime
       url: "https://example.com/notes/2026/02/22/abc123",
     });
 
-    assert.match(result, /mpUrl: https:\/\/example\.com\/notes\/2026\/02\/22\/abc123/);
+    assert.match(
+      result,
+      /mpUrl: https:\/\/example\.com\/notes\/2026\/02\/22\/abc123/,
+    );
   });
 
   it("Ensures trailing slash on permalink", () => {
@@ -142,6 +145,9 @@ title: Lunchtime
       url: "/notes/2026/02/22/no-trailing-slash",
     });
 
-    assert.match(result, /permalink: \/notes\/2026\/02\/22\/no-trailing-slash\//);
+    assert.match(
+      result,
+      /permalink: \/notes\/2026\/02\/22\/no-trailing-slash\//,
+    );
   });
 });
